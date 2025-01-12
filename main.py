@@ -16,7 +16,7 @@ if __name__ == "__main__":
     data_module.prepare_data()
 
     for i in range(5):
-        model = Classifier(lr=1e-2, weight_decay=WEIGHT_DECAY, k=i)
+        model = Classifier(lr_dino=1e-5, lr_class=1e-2, weight_decay=WEIGHT_DECAY, k=i)
         data_module.set_k(i)
 
         trainer = Trainer(

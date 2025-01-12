@@ -15,9 +15,10 @@ from loss import SupervisedContrastiveLoss, TverskyLoss
 
 
 class Classifier(LightningModule):
-    def __init__(self, lr, weight_decay, k):
+    def __init__(self, lr_dino, lr_class, weight_decay, k):
         super(Classifier, self).__init__()
-        self.lr = lr
+        self.lr_dino = lr_dino
+        self.lr_class = lr_class
         self.weight_decay = weight_decay
         self.k = k
 
@@ -42,8 +43,6 @@ class Classifier(LightningModule):
         )
 
         self.classifier = nn.Sequential(
-            nn.Linear(256, 256),
-            nn.LeakyReLU(),
             nn.Linear(256, 4),
         )
         self.softmax = nn.Softmax(dim=-1)
@@ -108,8 +107,9 @@ class Classifier(LightningModule):
 
         outputs, features = self.forward(img)
 
-        opt_features, opt_ppgl_classifier = self.optimizers()
+        opt_dino, opt_features, opt_ppgl_classifier = self.optimizers()
 
+        opt_dino.zero_grad()
         opt_ppgl_classifier.zero_grad()
         opt_features.zero_grad()
         loss = (
@@ -118,6 +118,7 @@ class Classifier(LightningModule):
             + self.conLoss(features)
         )
         self.manual_backward(loss)
+        opt_dino.step()
         opt_ppgl_classifier.step()
         opt_features.step()
 
@@ -148,8 +149,8 @@ class Classifier(LightningModule):
 
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-            + self.tverLoss(outputs, y)
-            + self.conLoss(features)
+            # + self.tverLoss(outputs, y)
+            # + self.conLoss(features)
         )
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
@@ -250,12 +251,18 @@ class Classifier(LightningModule):
         return self.forward(x)
 
     def configure_optimizers(self):
-        optimizer_features = optim.AdamW(
-            self.feature_extractor.parameters(), lr=self.lr, weight_decay=2e-5
+        optimizer_dino = optim.AdamW(
+            self.backbone.parameters(), lr=self.lr_dino, weight_decay=self.weight_decay
         )
-        optimizer_ppgl_classifier = optim.Adam(self.classifier.parameters(), lr=self.lr)
+        optimizer_features = optim.Adam(
+            self.feature_extractor.parameters(), lr=self.lr_dino
+        )
+        optimizer_ppgl_classifier = optim.Adam(
+            self.classifier.parameters(), lr=self.lr_class
+        )
 
         return [
+            optimizer_dino,
             optimizer_features,
             optimizer_ppgl_classifier,
         ]
