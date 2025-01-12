@@ -11,7 +11,7 @@ from torchmetrics.classification import (
 )
 
 from model_peft import ViTAdapterConfig, ViTFeatureExtractor
-from loss import SupervisedContrastiveLoss
+from loss import SupervisedContrastiveLoss, TverskyLoss
 
 
 class Classifier(LightningModule):
@@ -21,17 +21,15 @@ class Classifier(LightningModule):
         self.weight_decay = weight_decay
         self.k = k
 
-        self.conLoss = SupervisedContrastiveLoss(0.7)
+        self.tverLoss = TverskyLoss()
+        self.conLoss = SupervisedContrastiveLoss()
         self.ceLoss_ppgl = nn.CrossEntropyLoss(
             weight=362 / torch.Tensor([99.0, 362.0, 114.0, 75.0])
-        )
-        self.ceLoss_region = nn.CrossEntropyLoss(
-            weight=305 / torch.Tensor([305.0, 201.0, 80.0, 64.0])
         )
 
         self.setup_metrics()
 
-        backbone = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
+        backbone = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
         for param in backbone.parameters():
             param.requires_grad = False
         backbone.eval()
@@ -39,28 +37,16 @@ class Classifier(LightningModule):
         self.backbone = ViTFeatureExtractor(backbone, vitconf)
 
         self.feature_extractor = nn.Sequential(
-            nn.Linear(384, 256, False),
+            nn.Linear(768, 256),
             nn.LeakyReLU(),
         )
 
-        self.classifiers = nn.ModuleList()
-
-        for _ in range(4):
-            self.classifiers.append(
-                nn.Sequential(
-                    nn.Linear(256, 256, False),
-                    nn.LeakyReLU(),
-                    nn.Linear(256, 4),
-                )
-            )
-
-        self.softmax = nn.Softmax(dim=-1)
-
-        self.region_classifier = nn.Sequential(
-            nn.Linear(256, 256, False),
+        self.classifier = nn.Sequential(
+            nn.Linear(256, 256),
             nn.LeakyReLU(),
             nn.Linear(256, 4),
         )
+        self.softmax = nn.Softmax(dim=-1)
 
         self.dim = 1
         self.eps = 1e-6
@@ -106,7 +92,6 @@ class Classifier(LightningModule):
         img_feat = self.feature_extractor(img)
 
         f1, f2 = torch.split(img_feat, [bsz, bsz], dim=0)
-        reg_pred = self.region_classifier(f1)
         features = torch.cat(
             [
                 F.normalize(f1, p=2, dim=self.dim, eps=self.eps).unsqueeze(1),
@@ -115,41 +100,27 @@ class Classifier(LightningModule):
             dim=1,
         )
 
-        out = torch.zeros((bsz, 4, 4)).cuda()
-        for idx, classifier in enumerate(self.classifiers):
-            out[:, idx, ...] += classifier(f1)
+        out = self.classifier(f1)
 
-        if train:
-            out *= reg.view(bsz, 4, 1)
-        else:
-            out *= self.softmax(reg_pred).view(bsz, 4, 1)
-
-        out = out.sum(dim=-2)
-        out = self.softmax(out)
-
-        return out, features, reg_pred
+        return out, features
 
     def training_step(self, batch, batch_idx):
         reg, y, img, _ = batch
 
-        outputs, features, region = self.forward(img, reg)
+        outputs, features = self.forward(img, reg)
 
-        opt_features, opt_ppgl_classifier, optimizer_region_classifier = (
-            self.optimizers()
-        )
+        opt_features, opt_ppgl_classifier = self.optimizers()
 
         opt_ppgl_classifier.zero_grad()
         opt_features.zero_grad()
-        optimizer_region_classifier.zero_grad()
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-            + self.ceLoss_region(region, torch.argmax(reg, dim=-1))
-            + self.conLoss(features, torch.argmax(y, dim=-1))
+            + self.tverLoss(outputs, y)
+            + self.conLoss(features)
         )
         self.manual_backward(loss)
         opt_ppgl_classifier.step()
         opt_features.step()
-        optimizer_region_classifier.step()
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
         acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
@@ -174,12 +145,12 @@ class Classifier(LightningModule):
     def validation_step(self, batch, batch_idx):
         reg, y, img, _ = batch
 
-        outputs, features, region = self.forward(img, reg, False)
+        outputs, features = self.forward(img, reg, False)
 
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-            + self.conLoss(features, torch.argmax(y, dim=-1))
-            + self.ceLoss_region(region, torch.argmax(reg, dim=-1))
+            + self.tverLoss(outputs, y)
+            + self.conLoss(features)
         )
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
@@ -227,12 +198,12 @@ class Classifier(LightningModule):
     def test_step(self, batch, batch_idx):
         reg, y, img, _ = batch
 
-        outputs, features, region = self.forward(img, reg, False)
+        outputs, features = self.forward(img, reg, False)
 
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-            + self.conLoss(features, torch.argmax(y, dim=-1))
-            + self.ceLoss_region(region, torch.argmax(reg, dim=-1))
+            + self.tverLoss(outputs, y)
+            + self.conLoss(features)
         )
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
@@ -255,16 +226,16 @@ class Classifier(LightningModule):
             "val_rec": rec_total,
         }
 
-        for i, acc_ in enumerate(acc_multiclass.values()):
+        for i, acc_ in enumerate(acc_multiclass):
             log_dict["val_acc_" + str(i)] = acc_
 
-        for i, acc_ in enumerate(f1_multiclass.values()):
+        for i, acc_ in enumerate(f1_multiclass):
             log_dict["val_f1_" + str(i)] = acc_
 
-        for i, acc_ in enumerate(auc_multiclass.values()):
+        for i, acc_ in enumerate(auc_multiclass):
             log_dict["val_auc_" + str(i)] = acc_
 
-        for i, acc_ in enumerate(rec_multiclass.values()):
+        for i, acc_ in enumerate(rec_multiclass):
             log_dict["val_rec_" + str(i)] = acc_
 
         self.log_dict(
@@ -283,15 +254,9 @@ class Classifier(LightningModule):
         optimizer_features = optim.AdamW(
             self.feature_extractor.parameters(), lr=self.lr, weight_decay=2e-5
         )
-        optimizer_ppgl_classifier = optim.Adam(
-            self.classifiers.parameters(), lr=self.lr
-        )
-        optimizer_region_classifier = optim.Adam(
-            self.region_classifier.parameters(), lr=self.lr
-        )
+        optimizer_ppgl_classifier = optim.Adam(self.classifier.parameters(), lr=self.lr)
 
         return [
             optimizer_features,
             optimizer_ppgl_classifier,
-            optimizer_region_classifier,
         ]
