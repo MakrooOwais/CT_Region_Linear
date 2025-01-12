@@ -72,8 +72,7 @@ class Classifier(LightningModule):
     def init_weights(self):
         for sub_model in [
             self.feature_extractor.modules(),
-            self.classifiers.modules(),
-            self.region_classifier.modules(),
+            self.classifier.modules(),
         ]:
             for m in sub_model:
                 if isinstance(m, nn.Linear):
@@ -85,7 +84,7 @@ class Classifier(LightningModule):
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0)
 
-    def forward(self, img, reg, train=True):
+    def forward(self, img):
         bsz = img[0].shape[0]
         img = torch.cat(img, dim=0)
         img = self.backbone(img)
@@ -105,9 +104,9 @@ class Classifier(LightningModule):
         return out, features
 
     def training_step(self, batch, batch_idx):
-        reg, y, img, _ = batch
+        _, y, img, _ = batch
 
-        outputs, features = self.forward(img, reg)
+        outputs, features = self.forward(img)
 
         opt_features, opt_ppgl_classifier = self.optimizers()
 
@@ -143,9 +142,9 @@ class Classifier(LightningModule):
         return {"loss": loss, "outputs": outputs}
 
     def validation_step(self, batch, batch_idx):
-        reg, y, img, _ = batch
+        _, y, img, _ = batch
 
-        outputs, features = self.forward(img, reg, False)
+        outputs, features = self.forward(img)
 
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
@@ -196,9 +195,9 @@ class Classifier(LightningModule):
         self.load_state_dict(torch.load(f"model_{self.k}.pt"))
 
     def test_step(self, batch, batch_idx):
-        reg, y, img, _ = batch
+        _, y, img, _ = batch
 
-        outputs, features = self.forward(img, reg, False)
+        outputs, features = self.forward(img)
 
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
