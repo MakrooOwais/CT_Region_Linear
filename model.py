@@ -152,6 +152,8 @@ class Classifier(LightningModule):
             # + self.tverLoss(outputs, y)
             # + self.conLoss(features)
         )
+        print(self.tverLoss(outputs, y))
+        print(loss)
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
         acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
