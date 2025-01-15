@@ -5,7 +5,7 @@ from datamodule import CT_Datamodule
 from model import Classifier
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 WEIGHT_DECAY = 0.0005
 EPOCHS = 200
 
@@ -15,7 +15,7 @@ if __name__ == "__main__":
     data_module = CT_Datamodule("Dataset", batch_size=BATCH_SIZE, num_workers=5)
     data_module.prepare_data()
 
-    for i in range(5):
+    for i in range(10):
         model = Classifier(lr_dino=1e-5, lr_class=1e-2, weight_decay=WEIGHT_DECAY, k=i)
         data_module.set_k(i)
 

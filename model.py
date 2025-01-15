@@ -30,7 +30,7 @@ class Classifier(LightningModule):
 
         self.setup_metrics()
 
-        backbone = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
+        backbone = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
         for param in backbone.parameters():
             param.requires_grad = False
         backbone.eval()
@@ -38,7 +38,7 @@ class Classifier(LightningModule):
         self.backbone = ViTFeatureExtractor(backbone, vitconf)
 
         self.feature_extractor = nn.Sequential(
-            nn.Linear(768, 256),
+            nn.Linear(384, 256),
             nn.LeakyReLU(),
         )
 
@@ -115,7 +115,7 @@ class Classifier(LightningModule):
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
             + self.tverLoss(outputs, y)
-            + self.conLoss(features)
+            # + self.conLoss(features)
         )
         self.manual_backward(loss)
         opt_dino.step()
@@ -148,12 +148,10 @@ class Classifier(LightningModule):
         outputs, features = self.forward(img)
 
         loss = (
-            self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-            # + self.tverLoss(outputs, y)
+            # self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
+            self.tverLoss(outputs, y)
             # + self.conLoss(features)
         )
-        print(self.tverLoss(outputs, y))
-        print(loss)
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
         acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
@@ -257,7 +255,7 @@ class Classifier(LightningModule):
             self.backbone.parameters(), lr=self.lr_dino, weight_decay=self.weight_decay
         )
         optimizer_features = optim.Adam(
-            self.feature_extractor.parameters(), lr=self.lr_dino
+            self.feature_extractor.parameters(), lr=self.lr_class
         )
         optimizer_ppgl_classifier = optim.Adam(
             self.classifier.parameters(), lr=self.lr_class
