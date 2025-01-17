@@ -11,7 +11,7 @@ from torchmetrics.classification import (
 )
 
 from model_peft import ViTAdapterConfig, ViTFeatureExtractor
-from loss import SupervisedContrastiveLoss, TverskyLoss
+from loss import TverskyLoss
 
 
 class Classifier(LightningModule):
@@ -23,9 +23,11 @@ class Classifier(LightningModule):
         self.k = k
 
         self.tverLoss = TverskyLoss()
-        self.conLoss = SupervisedContrastiveLoss()
         self.ceLoss_ppgl = nn.CrossEntropyLoss(
-            weight=362 / torch.Tensor([99.0, 362.0, 114.0, 75.0])
+            weight=350 / torch.Tensor([99.0, 362.0, 114.0, 75.0])
+        )
+        self.ceLoss_reg = nn.CrossEntropyLoss(
+            weight=350 / torch.Tensor([305.0, 201.0, 80.0, 64.0])
         )
 
         self.setup_metrics()
@@ -42,9 +44,20 @@ class Classifier(LightningModule):
             nn.LeakyReLU(),
         )
 
-        self.classifier = nn.Sequential(
-            nn.Linear(256, 4),
-        )
+        self.reg_predictor = nn.Linear(256, 4)
+        self.classifiers = nn.ModuleList()
+
+        for _ in range(4):
+            self.classifiers.append(
+                nn.Sequential(
+                    nn.Linear(256, 246, False),
+                    nn.BatchNorm1d(256),
+                    nn.LeakyReLU(),
+                    nn.Dropout1d(),
+                    nn.Linear(256, 4),
+                )
+            )
+
         self.softmax = nn.Softmax(dim=-1)
 
         self.dim = 1
@@ -71,7 +84,8 @@ class Classifier(LightningModule):
     def init_weights(self):
         for sub_model in [
             self.feature_extractor.modules(),
-            self.classifier.modules(),
+            self.classifiers.modules(),
+            self.reg_predictor.modules(),
         ]:
             for m in sub_model:
                 if isinstance(m, nn.Linear):
@@ -83,44 +97,52 @@ class Classifier(LightningModule):
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0)
 
-    def forward(self, img):
+    def forward(self, img, reg, train=True):
         bsz = img[0].shape[0]
         img = torch.cat(img, dim=0)
         img = self.backbone(img)
         img_feat = self.feature_extractor(img)
+        reg_pred = self.reg_predictor(img_feat)
 
-        f1, f2 = torch.split(img_feat, [bsz, bsz], dim=0)
-        features = torch.cat(
-            [
-                F.normalize(f1, p=2, dim=self.dim, eps=self.eps).unsqueeze(1),
-                F.normalize(f2, p=2, dim=self.dim, eps=self.eps).unsqueeze(1),
-            ],
-            dim=1,
-        )
+        out = torch.zeros((bsz, 4, 4)).cuda()
+        for idx, classifier in enumerate(self.classifiers):
+            out[:, idx, ...] += classifier(img_feat)
 
-        out = self.classifier(f1)
+        if train:
+            out *= reg.view(bsz, 4, 1)
+        else:
+            out *= self.softmax(reg_pred).view(bsz, 4, 1)
 
-        return out, features
+        out = out.sum(dim=-2)
+
+        return out, reg_pred
 
     def training_step(self, batch, batch_idx):
-        _, y, img, _ = batch
+        reg, y, img, _ = batch
 
-        outputs, features = self.forward(img)
+        outputs, reg_pred = self.forward(img, reg)
 
-        opt_dino, opt_features, opt_ppgl_classifier = self.optimizers()
+        opt_dino, opt_features, opt_ppgl_classifier, opt_reg = self.optimizers()
 
         opt_dino.zero_grad()
         opt_ppgl_classifier.zero_grad()
         opt_features.zero_grad()
+        opt_reg.zero_grad()
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
+<<<<<<< HEAD
             + self.tverLoss(outputs, y)
             # + self.conLoss(features)
+=======
+            + self.ceLoss_reg(reg_pred, torch.argmax(reg, dim=-1)),
+            +self.tverLoss(outputs, y),
+>>>>>>> 30f5b5a (Added reg wise classifiers)
         )
         self.manual_backward(loss)
         opt_dino.step()
         opt_ppgl_classifier.step()
         opt_features.step()
+        opt_reg.step()
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
         acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
@@ -143,8 +165,9 @@ class Classifier(LightningModule):
         return {"loss": loss, "outputs": outputs}
 
     def validation_step(self, batch, batch_idx):
-        _, y, img, _ = batch
+        reg, y, img, _ = batch
 
+<<<<<<< HEAD
         outputs, features = self.forward(img)
 
         loss = (
@@ -152,12 +175,14 @@ class Classifier(LightningModule):
             self.tverLoss(outputs, y)
             # + self.conLoss(features)
         )
+=======
+        outputs, reg_pred = self.forward(img, reg, False)
+>>>>>>> 30f5b5a (Added reg wise classifiers)
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
         acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
 
         log_dict = {
-            "val_loss": loss,
             "val_acc": acc_total,
         }
 
@@ -171,7 +196,7 @@ class Classifier(LightningModule):
             prog_bar=True,
         )
 
-        return {"loss": loss, "outputs": outputs}
+        return {"outputs": outputs}
 
     def on_validation_epoch_end(self):
         not_complete = False
@@ -196,15 +221,9 @@ class Classifier(LightningModule):
         self.load_state_dict(torch.load(f"model_{self.k}.pt"))
 
     def test_step(self, batch, batch_idx):
-        _, y, img, _ = batch
+        reg, y, img, _ = batch
 
-        outputs, features = self.forward(img)
-
-        loss = (
-            self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-            + self.tverLoss(outputs, y)
-            + self.conLoss(features)
-        )
+        outputs, reg_pred = self.forward(img, reg, False)
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
         acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
@@ -219,24 +238,23 @@ class Classifier(LightningModule):
         rec_total = self.total_rec(outputs, torch.argmax(y, dim=-1))
 
         log_dict = {
-            "val_loss": loss,
-            "val_f1": f1_total,
-            "val_auc": auc_total,
-            "val_acc": acc_total,
-            "val_rec": rec_total,
+            "test_f1": f1_total,
+            "test_auc": auc_total,
+            "test_acc": acc_total,
+            "test_rec": rec_total,
         }
 
         for i, acc_ in enumerate(acc_multiclass):
-            log_dict["val_acc_" + str(i)] = acc_
+            log_dict["test_acc_" + str(i)] = acc_
 
         for i, acc_ in enumerate(f1_multiclass):
-            log_dict["val_f1_" + str(i)] = acc_
+            log_dict["test_f1_" + str(i)] = acc_
 
         for i, acc_ in enumerate(auc_multiclass):
-            log_dict["val_auc_" + str(i)] = acc_
+            log_dict["test_auc_" + str(i)] = acc_
 
         for i, acc_ in enumerate(rec_multiclass):
-            log_dict["val_rec_" + str(i)] = acc_
+            log_dict["test_rec_" + str(i)] = acc_
 
         self.log_dict(
             log_dict,
@@ -245,7 +263,7 @@ class Classifier(LightningModule):
             prog_bar=True,
         )
 
-        return {"loss": loss, "outputs": outputs}
+        return {"outputs": outputs}
 
     def predict(self, x):
         return self.forward(x)
@@ -258,11 +276,15 @@ class Classifier(LightningModule):
             self.feature_extractor.parameters(), lr=self.lr_class
         )
         optimizer_ppgl_classifier = optim.Adam(
-            self.classifier.parameters(), lr=self.lr_class
+            self.classifiers.parameters(), lr=self.lr_class
+        )
+        optimizer_region_classifier = optim.Adam(
+            self.reg_predictor.parameters(), lr=self.lr_class
         )
 
         return [
             optimizer_dino,
             optimizer_features,
             optimizer_ppgl_classifier,
+            optimizer_region_classifier,
         ]
