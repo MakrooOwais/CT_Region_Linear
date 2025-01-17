@@ -130,13 +130,8 @@ class Classifier(LightningModule):
         opt_reg.zero_grad()
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-<<<<<<< HEAD
-            + self.tverLoss(outputs, y)
-            # + self.conLoss(features)
-=======
             + self.ceLoss_reg(reg_pred, torch.argmax(reg, dim=-1)),
             +self.tverLoss(outputs, y),
->>>>>>> 30f5b5a (Added reg wise classifiers)
         )
         self.manual_backward(loss)
         opt_dino.step()
@@ -167,17 +162,7 @@ class Classifier(LightningModule):
     def validation_step(self, batch, batch_idx):
         reg, y, img, _ = batch
 
-<<<<<<< HEAD
-        outputs, features = self.forward(img)
-
-        loss = (
-            # self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-            self.tverLoss(outputs, y)
-            # + self.conLoss(features)
-        )
-=======
         outputs, reg_pred = self.forward(img, reg, False)
->>>>>>> 30f5b5a (Added reg wise classifiers)
 
         acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
         acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
