@@ -3,6 +3,7 @@ import torch
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import random_split, DataLoader
 from torchvision import transforms
+from copy import deepcopy
 
 from dataset import CT_Dataset
 
@@ -62,7 +63,7 @@ class CT_Datamodule(LightningDataModule):
         self.setup_done = False
 
     def prepare_data(self):
-        if not hasattr(self, "full_data"):
+        if not self.setup_done:
             self.full_data = random_split(
                 CT_Dataset(
                     "Dataset",
@@ -71,16 +72,19 @@ class CT_Datamodule(LightningDataModule):
                 self.num_samples,
             )
 
+        self.setup_done = True
+
     def set_k(self, k):
         self.k = k
         self.setup("fit")
 
     def setup(self, stage: str):
-        if stage == "fit" or stage == "val":
-            self.train = torch.utils.data.ConcatDataset(
-                [x for i, x in enumerate(self.full_data) if i != self.k]
-            )
-            self.val = self.full_data[self.k]
+        self.train = deepcopy(torch.utils.data.ConcatDataset(
+            [x for i, x in enumerate(self.full_data) if i != self.k]
+        ))
+        self.val = deepcopy(self.full_data[self.k])
+        self.val.transform = self.transform["test"]
+        self.train.transform = self.transform["train"]
 
     def train_dataloader(self):
         return DataLoader(

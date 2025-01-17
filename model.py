@@ -201,7 +201,8 @@ class Classifier(LightningModule):
             self.best_val = res
             torch.save(self.state_dict, f"model_{self.k}.pt")
 
-    def on_before_test_epoch(self):
+    def on_test_epoch_start(self):
+        print("loaded best dict")
         self.load_state_dict(torch.load(f"model_{self.k}.pt"))
 
     def test_step(self, batch, batch_idx):
@@ -228,17 +229,14 @@ class Classifier(LightningModule):
             "test_rec": rec_total,
         }
 
-        for i, acc_ in enumerate(acc_multiclass):
-            log_dict["test_acc_" + str(i)] = acc_
-
-        for i, acc_ in enumerate(f1_multiclass):
-            log_dict["test_f1_" + str(i)] = acc_
-
-        for i, acc_ in enumerate(auc_multiclass):
-            log_dict["test_auc_" + str(i)] = acc_
-
-        for i, acc_ in enumerate(rec_multiclass):
-            log_dict["test_rec_" + str(i)] = acc_
+        for name, met in [
+            ("acc", acc_multiclass),
+            ("f1", f1_multiclass),
+            ("auc", auc_multiclass),
+            ("rec", rec_multiclass),
+        ]:
+            for i, val in enumerate(met):
+                log_dict[f"test_{name}_{i}"] = val
 
         self.log_dict(
             log_dict,
