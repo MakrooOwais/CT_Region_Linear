@@ -45,12 +45,12 @@ class Classifier(LightningModule):
         )
 
         self.reg_predictor = nn.Linear(256, 4)
+        
         self.classifiers = nn.ModuleList()
-
         for _ in range(4):
             self.classifiers.append(
                 nn.Sequential(
-                    nn.Linear(256, 246, False),
+                    nn.Linear(256, 256, False),
                     nn.BatchNorm1d(256),
                     nn.LeakyReLU(),
                     nn.Dropout1d(),
