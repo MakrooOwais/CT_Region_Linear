@@ -99,7 +99,6 @@ class Classifier(LightningModule):
 
     def forward(self, img, reg, train=True):
         bsz = img[0].shape[0]
-        img = torch.cat(img, dim=0)
         img = self.backbone(img)
         img_feat = self.feature_extractor(img)
         reg_pred = self.reg_predictor(img_feat)

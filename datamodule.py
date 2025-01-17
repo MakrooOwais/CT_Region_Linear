@@ -44,15 +44,18 @@ class CT_Datamodule(LightningDataModule):
                     transforms.Resize((300, 300)),
                     transforms.RandomResizedCrop((224, 224), scale=(0.8, 1.0)),
                     transforms.RandomHorizontalFlip(),
-                    transforms.Normalize(mean=[0.1737, 0.1737, 0.1737], std=[0.2584, 0.2584, 0.2584]),
-                    
+                    transforms.Normalize(
+                        mean=[0.1737, 0.1737, 0.1737], std=[0.2584, 0.2584, 0.2584]
+                    ),
                 ]
             ),
             "test": transforms.Compose(
                 [
                     transforms.ToTensor(),
                     transforms.Resize((224, 224)),
-                    transforms.Normalize(mean=[0.1737, 0.1737, 0.1737], std=[0.2584, 0.2584, 0.2584]),
+                    transforms.Normalize(
+                        mean=[0.1737, 0.1737, 0.1737], std=[0.2584, 0.2584, 0.2584]
+                    ),
                 ]
             ),
         }
@@ -63,7 +66,7 @@ class CT_Datamodule(LightningDataModule):
             self.full_data = random_split(
                 CT_Dataset(
                     "Dataset",
-                    TwoCropTransform(self.transform["train"]),
+                    self.transform["train"],
                 ),
                 self.num_samples,
             )
