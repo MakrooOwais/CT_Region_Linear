@@ -45,7 +45,7 @@ class Classifier(LightningModule):
         )
 
         self.reg_predictor = nn.Linear(256, 4)
-        
+
         self.classifiers = nn.ModuleList()
         for _ in range(4):
             self.classifiers.append(
@@ -98,7 +98,7 @@ class Classifier(LightningModule):
                         nn.init.constant_(m.bias, 0)
 
     def forward(self, img, reg, train=True):
-        bsz = img[0].shape[0]
+        bsz = img.shape[0]
         img = self.backbone(img)
         img_feat = self.feature_extractor(img)
         reg_pred = self.reg_predictor(img_feat)
@@ -129,8 +129,8 @@ class Classifier(LightningModule):
         opt_reg.zero_grad()
         loss = (
             self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-            + self.ceLoss_reg(reg_pred, torch.argmax(reg, dim=-1)),
-            +self.tverLoss(outputs, y),
+            + self.ceLoss_reg(reg_pred, torch.argmax(reg, dim=-1))
+            + self.tverLoss(outputs, y)
         )
         self.manual_backward(loss)
         opt_dino.step()
