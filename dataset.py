@@ -7,8 +7,7 @@ from torch.utils.data import Dataset
 
 class CT_Dataset(Dataset):
     region2idx = {
-        "Abdomen_Pelvis_But_Not_Adrenal": 0,
-        "Adrenal": 0,
+        "Abdomen": 0,
         "Chest": 1,
         "Head_Neck": 2,
     }
