@@ -8,9 +8,9 @@ from torch.utils.data import Dataset
 class CT_Dataset(Dataset):
     region2idx = {
         "Abdomen_Pelvis_But_Not_Adrenal": 0,
-        "Adrenal": 1,
-        "Chest": 2,
-        "Head_Neck": 3,
+        "Adrenal": 0,
+        "Chest": 1,
+        "Head_Neck": 2,
     }
     tumor2idx = {"Kinase": 0, "SDHB": 1, "SDHx": 1, "Sporadic": 2, "VHL_EPAS1": 3}
 
@@ -46,7 +46,7 @@ class CT_Dataset(Dataset):
         encoded_arr_region[self.region2idx[region]] = 1
         encoded_arr_tumor = np.zeros(4, dtype=float)
         encoded_arr_tumor[self.tumor2idx[tumor]] = 1
-        
+
         return encoded_arr_region, encoded_arr_tumor, img, full_scan_path
 
     def __len__(self):

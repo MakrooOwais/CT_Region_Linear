@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-
 from pytorch_lightning import LightningModule
 from torch import nn, optim
 from torchmetrics.classification import (
@@ -9,61 +8,92 @@ from torchmetrics.classification import (
     MulticlassAUROC,
     MulticlassRecall,
 )
-
-from model_peft import ViTAdapterConfig, ViTFeatureExtractor
+from torchvision.models import swin_transformer
 from loss import TverskyLoss
 
 
+class AnatomicalLocationWeightEstimator(nn.Module):
+    def __init__(self, input_dim=768):
+        super().__init__()
+        self.fc = nn.Linear(input_dim, 3)  # 3 anatomical locations
+
+    def forward(self, x):
+        return F.softmax(self.fc(x), dim=1)
+
+
+class LocationSpecificClassifier(nn.Module):
+    def __init__(self, input_dim=768, hidden_dim=256):
+        super().__init__()
+        self.fc1 = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim, bias=False),
+            nn.BatchNorm1d(hidden_dim),
+            nn.LeakyReLU(),
+            nn.Dropout(0.3),
+        )
+        self.fc2 = nn.Linear(hidden_dim, 4)  # 4 genetic clusters
+
+    def forward(self, x):
+        x = self.fc1(x)
+        return self.fc2(x)
+
+
 class Classifier(LightningModule):
-    def __init__(self, lr_dino, lr_class, weight_decay, k):
-        super(Classifier, self).__init__()
+    def __init__(
+        self,
+        lr_dino=1e-5,
+        lr_class=1e-2,
+        weight_decay=0.0005,
+        k=0,
+        lambda_weight=0.1,
+        alpha=0.7,
+        beta=0.3,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
         self.lr_dino = lr_dino
         self.lr_class = lr_class
         self.weight_decay = weight_decay
         self.k = k
+        self.lambda_weight = lambda_weight
+        self.alpha = alpha
+        self.beta = beta
 
-        self.tverLoss = TverskyLoss()
-        self.ceLoss_ppgl = nn.CrossEntropyLoss(
+        # Loss functions
+        self.tversky_loss = TverskyLoss(alpha=alpha, beta=beta)
+        self.ce_loss_ppgl = nn.CrossEntropyLoss(
             weight=350 / torch.Tensor([99.0, 362.0, 114.0, 75.0])
         )
-        self.ceLoss_reg = nn.CrossEntropyLoss(
-            weight=350 / torch.Tensor([305.0, 201.0, 80.0, 64.0])
+        self.ce_loss_region = nn.CrossEntropyLoss(
+            weight=350
+            / torch.Tensor([506.0, 80.0, 64.0])  # Abdomen, Chest, Head & Neck
         )
 
+        # Metrics
         self.setup_metrics()
 
-        backbone = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
-        for param in backbone.parameters():
-            param.requires_grad = False
-        backbone.eval()
-        vitconf = ViTAdapterConfig()
-        self.backbone = ViTFeatureExtractor(backbone, vitconf)
+        # Feature extractor (Swin Transformer backbone)
+        self.backbone = swin_transformer.swin_t(weights="DEFAULT")
+        self.backbone.head = nn.Identity()  # Replace classification head with identity
+        self.feature_dim = 768  # Output dimension of Swin-T
 
+        # Feature projection layer
         self.feature_extractor = nn.Sequential(
-            nn.Linear(384, 256),
+            nn.Linear(self.feature_dim, 256),
             nn.LeakyReLU(),
         )
 
-        self.reg_predictor = nn.Linear(256, 4)
+        # Anatomical location weight estimator
+        self.location_estimator = AnatomicalLocationWeightEstimator(256)
 
-        self.classifiers = nn.ModuleList()
-        for _ in range(4):
-            self.classifiers.append(
-                nn.Sequential(
-                    nn.Linear(256, 256, False),
-                    nn.BatchNorm1d(256),
-                    nn.LeakyReLU(),
-                    nn.Dropout1d(),
-                    nn.Linear(256, 4),
-                )
-            )
+        # Location-specific classifiers
+        self.classifiers = nn.ModuleList(
+            [
+                LocationSpecificClassifier(256, 256)  # Head & Neck
+                for _ in range(3)  # 3 anatomical locations
+            ]
+        )
 
-        self.softmax = nn.Softmax(dim=-1)
-
-        self.dim = 1
-        self.eps = 1e-6
         self.best_val = -float("inf")
-
         self.init_weights()
         self.automatic_optimization = False
 
@@ -71,13 +101,10 @@ class Classifier(LightningModule):
         """Initialize all metrics for evaluation"""
         self.multiclass_accuracy = MulticlassAccuracy(num_classes=4, average=None)
         self.total_accuracy = MulticlassAccuracy(num_classes=4)
-
         self.multiclass_f1 = MulticlassF1Score(num_classes=4, average=None)
         self.total_f1 = MulticlassF1Score(num_classes=4)
-
         self.multiclass_auc = MulticlassAUROC(num_classes=4, average=None)
         self.total_auc = MulticlassAUROC(num_classes=4)
-
         self.multiclass_rec = MulticlassRecall(num_classes=4, average=None)
         self.total_rec = MulticlassRecall(num_classes=4)
 
@@ -85,7 +112,7 @@ class Classifier(LightningModule):
         for sub_model in [
             self.feature_extractor.modules(),
             self.classifiers.modules(),
-            self.reg_predictor.modules(),
+            self.location_estimator.modules(),
         ]:
             for m in sub_model:
                 if isinstance(m, nn.Linear):
@@ -97,52 +124,82 @@ class Classifier(LightningModule):
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0)
 
-    def forward(self, img, reg, train=True):
+    def forward(self, img, region_gt=None, train=True):
         bsz = img.shape[0]
-        img = self.backbone(img)
-        img_feat = self.feature_extractor(img)
-        reg_pred = self.reg_predictor(img_feat)
 
-        out = torch.zeros((bsz, 4, 4)).cuda()
+        # Extract features using the backbone
+        features = self.backbone(img)
+
+        # Project features
+        features = self.feature_extractor(features)
+
+        # Get anatomical location weights
+        location_weights = self.location_estimator(features)
+
+        # Get predictions from each location-specific classifier
+        genetic_preds = torch.zeros((bsz, 3, 4)).to(img.device)
         for idx, classifier in enumerate(self.classifiers):
-            out[:, idx, ...] += classifier(img_feat)
+            genetic_preds[:, idx] = classifier(features)
 
-        if train:
-            out *= reg.view(bsz, 4, 1)
+        # Weighted aggregation
+        if train and region_gt is not None:
+            # During training, use ground truth region weights
+            weighted_pred = torch.sum(genetic_preds * region_gt.view(bsz, 3, 1), dim=1)
         else:
-            out *= self.softmax(reg_pred).view(bsz, 4, 1)
+            # During inference, use predicted region weights
+            weighted_pred = torch.sum(
+                genetic_preds * location_weights.view(bsz, 3, 1), dim=1
+            )
 
-        out = out.sum(dim=-2)
-
-        return out, reg_pred
+        return weighted_pred, location_weights
 
     def training_step(self, batch, batch_idx):
-        reg, y, img, _ = batch
+        region, y, img, _ = batch
 
-        outputs, reg_pred = self.forward(img, reg)
+        # Convert region from one-hot to 3-class format (removing the 4th dimension which is unused)
+        region = region[:, :3]
 
-        opt_dino, opt_features, opt_ppgl_classifier, opt_reg = self.optimizers()
+        # Forward pass
+        genetic_pred, location_weights = self.forward(img, region)
 
-        opt_dino.zero_grad()
-        opt_ppgl_classifier.zero_grad()
+        # Get optimizers
+        opt_backbone, opt_features, opt_classifiers, opt_location = self.optimizers()
+
+        # Zero gradients
+        opt_backbone.zero_grad()
         opt_features.zero_grad()
-        opt_reg.zero_grad()
-        loss = (
-            self.ceLoss_ppgl(outputs, torch.argmax(y, dim=-1))
-            + self.ceLoss_reg(reg_pred, torch.argmax(reg, dim=-1))
-            + self.tverLoss(outputs, y)
-        )
-        self.manual_backward(loss)
-        opt_dino.step()
-        opt_ppgl_classifier.step()
-        opt_features.step()
-        opt_reg.step()
+        opt_classifiers.zero_grad()
+        opt_location.zero_grad()
 
-        acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
-        acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
+        # Calculate losses
+        ce_loss = self.ce_loss_ppgl(genetic_pred, torch.argmax(y, dim=-1))
+        tv_loss = self.tversky_loss(genetic_pred, y)
+        ppgl_loss = ce_loss + tv_loss
+
+        location_loss = self.ce_loss_region(
+            location_weights, torch.argmax(region, dim=-1)
+        )
+
+        # Combined loss as per paper
+        total_loss = ppgl_loss + self.lambda_weight * location_loss
+
+        # Backward pass
+        self.manual_backward(total_loss)
+
+        # Update weights
+        opt_backbone.step()
+        opt_features.step()
+        opt_classifiers.step()
+        opt_location.step()
+
+        # Log metrics
+        acc_multiclass = self.multiclass_accuracy(genetic_pred, torch.argmax(y, dim=-1))
+        acc_total = self.total_accuracy(genetic_pred, torch.argmax(y, dim=-1))
 
         log_dict = {
-            "train_loss": loss,
+            "train_loss": total_loss,
+            "train_ppgl_loss": ppgl_loss,
+            "train_location_loss": location_loss,
             "train_acc": acc_total,
         }
 
@@ -156,17 +213,35 @@ class Classifier(LightningModule):
             prog_bar=True,
         )
 
-        return {"loss": loss, "outputs": outputs}
+        return {"loss": total_loss, "outputs": genetic_pred}
 
     def validation_step(self, batch, batch_idx):
-        reg, y, img, _ = batch
+        region, y, img, _ = batch
 
-        outputs, reg_pred = self.forward(img, reg, False)
+        # Convert region from one-hot to 3-class format
+        region = region[:, :3]
 
-        acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
-        acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
+        # Forward pass (don't use ground truth regions during validation)
+        genetic_pred, location_weights = self.forward(img, train=False)
+
+        # Calculate losses
+        ce_loss = self.ce_loss_ppgl(genetic_pred, torch.argmax(y, dim=-1))
+        tv_loss = self.tversky_loss(genetic_pred, y)
+        ppgl_loss = ce_loss + tv_loss
+
+        location_loss = self.ce_loss_region(
+            location_weights, torch.argmax(region, dim=-1)
+        )
+
+        # Combined loss
+        total_loss = ppgl_loss + self.lambda_weight * location_loss
+
+        # Log metrics
+        acc_multiclass = self.multiclass_accuracy(genetic_pred, torch.argmax(y, dim=-1))
+        acc_total = self.total_accuracy(genetic_pred, torch.argmax(y, dim=-1))
 
         log_dict = {
+            "val_loss": total_loss,
             "val_acc": acc_total,
         }
 
@@ -180,11 +255,12 @@ class Classifier(LightningModule):
             prog_bar=True,
         )
 
-        return {"outputs": outputs}
+        return {"outputs": genetic_pred}
 
     def on_validation_epoch_end(self):
         not_complete = False
-        accs = torch.zeros(4).cuda()
+        accs = torch.zeros(4).to(self.device)
+
         for i in range(4):
             acc = self.trainer.callback_metrics[f"val_acc_{i}"]
             accs[i] += acc
@@ -192,36 +268,38 @@ class Classifier(LightningModule):
                 not_complete = True
 
         if not not_complete:
-            torch.save(self.state_dict, f"model_{self.k}.pt")
+            torch.save(self.state_dict(), f"model_{self.k}.pt")
             self.trainer.should_stop = True
 
         res = accs.mean() - accs.std()
-
         if res > self.best_val:
             self.best_val = res
-            torch.save(self.state_dict, f"model_{self.k}.pt")
+            torch.save(self.state_dict(), f"model_{self.k}.pt")
 
     def on_test_epoch_start(self):
         print("loaded best dict")
         self.load_state_dict(torch.load(f"model_{self.k}.pt"))
 
     def test_step(self, batch, batch_idx):
-        reg, y, img, _ = batch
+        region, y, img, _ = batch
 
-        outputs, reg_pred = self.forward(img, reg, False)
+        # Convert region from one-hot to 3-class format
+        region = region[:, :3]
 
-        acc_multiclass = self.multiclass_accuracy(outputs, torch.argmax(y, dim=-1))
-        acc_total = self.total_accuracy(outputs, torch.argmax(y, dim=-1))
+        # Forward pass
+        genetic_pred, _ = self.forward(img, train=False)
 
-        f1_multiclass = self.multiclass_f1(outputs, torch.argmax(y, dim=-1))
-        f1_total = self.total_f1(outputs, torch.argmax(y, dim=-1))
+        # Calculate metrics
+        acc_multiclass = self.multiclass_accuracy(genetic_pred, torch.argmax(y, dim=-1))
+        acc_total = self.total_accuracy(genetic_pred, torch.argmax(y, dim=-1))
+        f1_multiclass = self.multiclass_f1(genetic_pred, torch.argmax(y, dim=-1))
+        f1_total = self.total_f1(genetic_pred, torch.argmax(y, dim=-1))
+        auc_multiclass = self.multiclass_auc(genetic_pred, torch.argmax(y, dim=-1))
+        auc_total = self.total_auc(genetic_pred, torch.argmax(y, dim=-1))
+        rec_multiclass = self.multiclass_rec(genetic_pred, torch.argmax(y, dim=-1))
+        rec_total = self.total_rec(genetic_pred, torch.argmax(y, dim=-1))
 
-        auc_multiclass = self.multiclass_auc(outputs, torch.argmax(y, dim=-1))
-        auc_total = self.total_auc(outputs, torch.argmax(y, dim=-1))
-
-        rec_multiclass = self.multiclass_rec(outputs, torch.argmax(y, dim=-1))
-        rec_total = self.total_rec(outputs, torch.argmax(y, dim=-1))
-
+        # Log metrics
         log_dict = {
             "test_f1": f1_total,
             "test_auc": auc_total,
@@ -245,28 +323,31 @@ class Classifier(LightningModule):
             prog_bar=True,
         )
 
-        return {"outputs": outputs}
-
-    def predict(self, x):
-        return self.forward(x)
+        return {"outputs": genetic_pred}
 
     def configure_optimizers(self):
-        optimizer_dino = optim.AdamW(
-            self.backbone.parameters(), lr=self.lr_dino, weight_decay=self.weight_decay
+        optimizer_backbone = optim.AdamW(
+            self.backbone.parameters(),
+            lr=self.lr_dino,
+            weight_decay=self.weight_decay,
+            betas=(0.9, 0.999),
         )
-        optimizer_features = optim.Adam(
-            self.feature_extractor.parameters(), lr=self.lr_class
+
+        optimizer_features = optim.AdamW(
+            self.feature_extractor.parameters(), lr=self.lr_class, betas=(0.9, 0.999)
         )
-        optimizer_ppgl_classifier = optim.Adam(
-            self.classifiers.parameters(), lr=self.lr_class
+
+        optimizer_classifiers = optim.AdamW(
+            self.classifiers.parameters(), lr=self.lr_class, betas=(0.9, 0.999)
         )
-        optimizer_region_classifier = optim.Adam(
-            self.reg_predictor.parameters(), lr=self.lr_class
+
+        optimizer_location = optim.AdamW(
+            self.location_estimator.parameters(), lr=self.lr_class, betas=(0.9, 0.999)
         )
 
         return [
-            optimizer_dino,
+            optimizer_backbone,
             optimizer_features,
-            optimizer_ppgl_classifier,
-            optimizer_region_classifier,
+            optimizer_classifiers,
+            optimizer_location,
         ]
