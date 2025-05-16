@@ -4,7 +4,7 @@ This repository contains the implementation of a novel multi-headed deep learnin
 
 ## Overview
 
-Pheochromocytoma and paraganglioma (PPGLs) are rare neuroendocrine tumors that pose significant diagnostic challenges due to their heterogeneous appearance and complex anatomical locations[1]. The treatment and outcome of PPGLs depend on their four genetic subtypes:
+Pheochromocytoma and paraganglioma (PPGLs) are rare neuroendocrine tumors that pose significant diagnostic challenges due to their heterogeneous appearance and complex anatomical locations. The treatment and outcome of PPGLs depend on their four genetic subtypes:
 
 - SDHx
 - VHL/EPAS1
@@ -42,7 +42,7 @@ The model architecture consists of:
 
 ## Dataset
 
-The dataset used in this study comprises 650 axial slices extracted from the CE-CTs of 287 human subjects[1]. The dataset is categorized based on genetic clusters:
+The dataset used in this study comprises 650 axial slices extracted from the CE-CTs of 287 human subjects. The dataset is categorized based on genetic clusters:
 
 - SDHx (362 samples)
 - VHL/EPAS1 (75 samples)
@@ -124,9 +124,24 @@ with torch.no_grad():
 
 ## Results
 
-The model achieves significant improvements across multiple genetic types with an overall AUC of 0.722[1]. It outperforms existing state-of-the-art methods by 17.4% and 23.9% in overall F1-score and recall respectively. 
+The model achieves significant improvements across multiple genetic types with an overall AUC of 0.722. It outperforms existing state-of-the-art methods by 17.4% and 23.9% in overall F1-score and recall respectively.
 
 The proposal shows a remarkable increase of 22.5% and 18% in F1-score and recall for kinase signaling, surpassing all prior methods.
+
+## Example Test Dataset
+
+We have provided a subset of the data for testing. The test data is categorized based on genetic clusters:
+
+- SDHx (36 samples)
+- VHL/EPAS1 (14 samples)
+- Kinase signaling (18 samples)
+- Sporadic (10 samples)
+
+The anatomical location-wise composition includes:
+
+- Abdomen (30 samples)
+- Chest (27 samples)
+- Head and neck (21 samples)
 
 ## Citation
 
